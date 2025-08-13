@@ -13,6 +13,14 @@ import (
 	"strings"
 )
 
+// Sentinel errors
+var (
+	ErrInvalidAddress     = errors.New("ipv6: invalid address")
+	ErrInvalidCIDR        = errors.New("ipv6: invalid cidr")
+	ErrInvalidPrefix      = errors.New("ipv6: invalid prefix length")
+	ErrInvalidSplitPrefix = errors.New("ipv6: invalid new prefix")
+)
+
 // Address represents a single 128-bit IPv6 address (always a 16-byte value).
 type Address struct {
 	ip net.IP // 16 bytes
@@ -23,7 +31,7 @@ type Address struct {
 func NewAddress(ip net.IP) (Address, error) {
 	v := ip.To16()
 	if v == nil || v.To4() != nil {
-		return Address{}, errors.New("not a valid IPv6 address")
+		return Address{}, ErrInvalidAddress
 	}
 	return Address{ip: append(net.IP(nil), v...)}, nil
 }
@@ -32,7 +40,7 @@ func NewAddress(ip net.IP) (Address, error) {
 func Parse(s string) (Address, error) {
 	ip := net.ParseIP(strings.TrimSpace(s))
 	if ip == nil {
-		return Address{}, fmt.Errorf("invalid IPv6 address: %s", s)
+		return Address{}, fmt.Errorf("%w: %s", ErrInvalidAddress, s)
 	}
 	return NewAddress(ip)
 }
@@ -52,8 +60,43 @@ func (a Address) Expanded() string {
 // BigInt returns a new big.Int holding the unsigned 128-bit value.
 func (a Address) BigInt() *big.Int { return new(big.Int).SetBytes(a.ip) }
 
+// internal fast representation helpers
+func (a Address) hiLo() (hi, lo uint64) {
+	for i := 0; i < 8; i++ {
+		hi = hi<<8 | uint64(a.ip[i])
+	}
+	for i := 8; i < 16; i++ {
+		lo = lo<<8 | uint64(a.ip[i])
+	}
+	return
+}
+func fromHiLo(hi, lo uint64) Address {
+	b := make([]byte, 16)
+	for i := 7; i >= 0; i-- {
+		b[i] = byte(hi)
+		hi >>= 8
+	}
+	for i := 15; i >= 8; i-- {
+		b[i] = byte(lo)
+		lo >>= 8
+	}
+	addr, _ := NewAddress(b)
+	return addr
+}
+
 // Add returns a+delta (mod 2^128).
 func (a Address) Add(delta *big.Int) Address {
+	// fast path for <=64-bit delta
+	if delta.BitLen() <= 64 {
+		hi, lo := a.hiLo()
+		lo2 := lo + delta.Uint64()
+		carry := uint64(0)
+		if lo2 < lo {
+			carry = 1
+		}
+		hi += carry
+		return fromHiLo(hi, lo2)
+	}
 	mod := new(big.Int).Lsh(big.NewInt(1), 128)
 	v := a.BigInt()
 	v.Add(v, delta)
@@ -65,8 +108,23 @@ func (a Address) Add(delta *big.Int) Address {
 
 // Sub returns a-delta (mod 2^128).
 func (a Address) Sub(delta *big.Int) Address {
-	neg := new(big.Int).Neg(delta)
-	return a.Add(neg)
+	// fast path for <=64-bit delta
+	if delta.BitLen() <= 64 {
+		if delta.Sign() < 0 { // negative, fallback to Add logic
+			return a.Add(new(big.Int).Neg(delta))
+		}
+		// perform subtraction in hi/lo
+		hi, lo := a.hiLo()
+		d := delta.Uint64()
+		if lo >= d {
+			lo = lo - d
+		} else {
+			lo = (lo - d) // will wrap automatically
+			hi--
+		}
+		return fromHiLo(hi, lo)
+	}
+	return a.Add(new(big.Int).Neg(delta))
 }
 
 // Compare performs lexicographic comparison: -1 if a<b, 0 if equal, 1 if a>b.
@@ -100,7 +158,7 @@ type CIDR struct {
 func ParseCIDR(s string) (CIDR, error) {
 	ip, n, err := net.ParseCIDR(strings.TrimSpace(s))
 	if err != nil {
-		return CIDR{}, err
+		return CIDR{}, ErrInvalidCIDR
 	}
 	addr, err := NewAddress(ip)
 	if err != nil {
@@ -108,7 +166,7 @@ func ParseCIDR(s string) (CIDR, error) {
 	}
 	ones, bits := n.Mask.Size()
 	if bits != 128 {
-		return CIDR{}, errors.New("not an IPv6 cidr")
+		return CIDR{}, ErrInvalidCIDR
 	}
 	return CIDR{base: addr.Mask(ones), plen: ones}, nil
 }
@@ -116,7 +174,7 @@ func ParseCIDR(s string) (CIDR, error) {
 // NewCIDR constructs a canonical CIDR from a base address and prefix length.
 func NewCIDR(base Address, plen int) (CIDR, error) {
 	if plen < 0 || plen > 128 {
-		return CIDR{}, errors.New("invalid prefix length")
+		return CIDR{}, ErrInvalidPrefix
 	}
 	return CIDR{base: base.Mask(plen), plen: plen}, nil
 }
@@ -165,21 +223,18 @@ func (c CIDR) LastHost() Address {
 }
 
 // ContainsAddress reports whether a is inside c.
-func (c CIDR) ContainsAddress(a Address) bool {
-	return c.base.Compare(a.Mask(c.plen)) == 0
-}
+func (c CIDR) ContainsAddress(a Address) bool { return c.base.Compare(a.Mask(c.plen)) == 0 }
 
 // ContainsCIDR reports whether network o is fully contained within c.
-func (c CIDR) ContainsCIDR(o CIDR) bool {
-	return c.plen <= o.plen && c.ContainsAddress(o.base)
-}
+func (c CIDR) ContainsCIDR(o CIDR) bool { return c.plen <= o.plen && c.ContainsAddress(o.base) }
 
-// Overlaps reports whether two networks overlap in address space.
+// Overlaps reports whether two networks overlap in address space (interval test).
 func (c CIDR) Overlaps(o CIDR) bool {
-	if c.plen <= o.plen {
-		return c.ContainsAddress(o.base) || o.ContainsAddress(c.LastHost())
-	}
-	return o.Overlaps(c)
+	cStart := c.FirstHost().BigInt()
+	cEnd := c.LastHost().BigInt()
+	oStart := o.FirstHost().BigInt()
+	oEnd := o.LastHost().BigInt()
+	return cStart.Cmp(oEnd) <= 0 && oStart.Cmp(cEnd) <= 0
 }
 
 // Next returns the next adjacent network of the same prefix length.
@@ -201,7 +256,7 @@ func (c CIDR) Prev() CIDR {
 // Split divides the network into subnets of newPrefix length.
 func (c CIDR) Split(newPrefix int) ([]CIDR, error) {
 	if newPrefix <= c.plen || newPrefix > 128 {
-		return nil, errors.New("invalid new prefix")
+		return nil, ErrInvalidSplitPrefix
 	}
 	countBits := newPrefix - c.plen
 	parts := 1 << countBits
@@ -214,6 +269,36 @@ func (c CIDR) Split(newPrefix int) ([]CIDR, error) {
 		cur = cur.Add(step)
 	}
 	return res, nil
+}
+
+// SubnetIterator allows streaming iteration over subnets without allocating all.
+type SubnetIterator struct {
+	remaining int
+	current   Address
+	step      *big.Int
+	plen      int
+}
+
+// SubnetIterator returns an iterator for subnets at newPrefix.
+func (c CIDR) SubnetIterator(newPrefix int) (*SubnetIterator, error) {
+	if newPrefix <= c.plen || newPrefix > 128 {
+		return nil, ErrInvalidSplitPrefix
+	}
+	countBits := newPrefix - c.plen
+	parts := 1 << countBits
+	step := new(big.Int).Rsh(c.HostCount(), uint(countBits))
+	return &SubnetIterator{remaining: parts, current: c.base, step: step, plen: newPrefix}, nil
+}
+
+// Next returns next subnet and true, or zero value and false when done.
+func (it *SubnetIterator) Next() (CIDR, bool) {
+	if it.remaining == 0 {
+		return CIDR{}, false
+	}
+	c, _ := NewCIDR(it.current, it.plen)
+	it.current = it.current.Add(it.step)
+	it.remaining--
+	return c, true
 }
 
 // Summarize tries to merge CIDRs into the minimal covering list by combining
@@ -229,7 +314,11 @@ func Summarize(cidrs []CIDR) []CIDR {
 		norm[i].base = norm[i].base.Mask(norm[i].plen)
 	}
 	sort.Slice(norm, func(i, j int) bool {
-		return norm[i].base.Compare(norm[j].base) < 0 || (norm[i].base.Compare(norm[j].base) == 0 && norm[i].plen < norm[j].plen)
+		cmp := norm[i].base.Compare(norm[j].base)
+		if cmp == 0 {
+			return norm[i].plen < norm[j].plen
+		}
+		return cmp < 0
 	})
 	changed := true
 	for changed {

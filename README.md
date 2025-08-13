@@ -3,16 +3,19 @@
 IPv6 subnet calculator and Go library. Command line tool plus package for parsing, formatting, subnet math, summarization and basic analysis of IPv6 networks.
 
 ## Features
-- Parse / validate IPv6 addresses and CIDRs
+- Parse / validate IPv6 addresses and CIDRs (sentinel errors: ErrInvalidAddress, ErrInvalidCIDR, etc.)
 - Expand / compress addresses
 - Network base, first, last, count of addresses
-- Address arithmetic (add / subtract / offset) (library)
+- Address arithmetic (add / subtract / offset) (library) with fast uint64 paths
 - Adjacent network navigation (next / prev) (library)
-- Split a network into smaller subnets
+- Split a network into smaller subnets (iterator or full slice)
 - Summarize sibling networks
-- Containment and overlap checks (library)
+- Containment and overlap checks (library) with simplified interval overlap logic
 - Reverse DNS (ip6.arpa) name generation
-- Output: human, JSON, YAML
+- Output: human (line-per-item lists), JSON, YAML
+- Shell completion scripts (bash, zsh, fish, powershell)
+- Man page generation command
+- Version command (build-time ldflags)
 - Property based tests for address round‑trip
 
 ## Install
@@ -36,9 +39,12 @@ Commands:
 - info        show details for an address or CIDR
 - expand      expanded form of an address
 - compress    compressed form
-- split       split a CIDR into smaller prefixes
+- split       split a CIDR into smaller prefixes (requires --new-prefix > original)
 - summarize   merge a set of CIDRs
 - reverse     ip6.arpa reverse DNS name
+- version     print version info
+- completion  generate shell completion script
+- man         generate man pages into a directory
 
 Examples:
 ```
@@ -63,9 +69,23 @@ ip6calc reverse 2001:db8::1
 
 # JSON output
 ip6calc info 2001:db8::/64 -o json
+
+# Generate bash completion
+ip6calc completion bash > /etc/bash_completion.d/ip6calc
+
+# Generate man pages
+ip6calc man ./manpages
+
+# Version
+ip6calc version
 ```
 
 ## Library
+Constructor pattern for CLI embedding:
+```go
+cmd := cli.NewRootCmd(os.Stdout)
+cmd.Execute()
+```
 Basic inspection:
 ```go
 cidr, _ := ipv6.ParseCIDR("2001:db8::/64")
@@ -73,6 +93,16 @@ fmt.Println(cidr.Network())
 fmt.Println(cidr.FirstHost())
 fmt.Println(cidr.LastHost())
 fmt.Println(cidr.HostCount())
+```
+Subnet iteration (memory efficient):
+```go
+c, _ := ipv6.ParseCIDR("2001:db8::/120")
+it, _ := c.SubnetIterator(124)
+for {
+  sub, ok := it.Next()
+  if !ok { break }
+  fmt.Println(sub)
+}
 ```
 Summarize:
 ```go
@@ -95,6 +125,13 @@ fmt.Println(outer.ContainsCIDR(inner))
 
 ## Output Formats
 Default is human-readable. Use `-o json` or `-o yaml` for structured output.
+Lists (e.g. split results) print one item per line in human mode.
+
+## Version Info
+Injected at build time:
+```
+go build -ldflags "-X github.com/zlobste/ip6calc/internal/cli.Version=v1.2.3" ./cmd/ip6calc
+```
 
 ## Testing
 ```
@@ -106,10 +143,5 @@ go test ./ipv6 -coverprofile=coverage.out
 go tool cover -func=coverage.out
 ```
 
-## Contributing
-1. Open an issue or PR
-2. Add tests for changes
-3. Run `go fmt` / `go vet`
-
 ## License
-MIT
+MIT (see LICENSE file)
