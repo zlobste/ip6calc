@@ -51,15 +51,20 @@ func render(v any) error {
 	w := rootCmd.OutOrStdout()
 	switch format {
 	case outHuman:
-		fmt.Fprintln(w, v)
+		if _, err := fmt.Fprintln(w, v); err != nil {
+			return err
+		}
 	case outJSON:
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(v)
 	case outYAML:
 		enc := yaml.NewEncoder(w)
-		defer enc.Close()
-		return enc.Encode(v)
+		if err := enc.Encode(v); err != nil {
+			_ = enc.Close()
+			return err
+		}
+		return enc.Close()
 	default:
 		return errors.New("unknown output format")
 	}

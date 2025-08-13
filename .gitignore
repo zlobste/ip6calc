@@ -1,7 +1,27 @@
-# Binaries
-ip6calc
+# Go build artifacts
+bin/
+/dist/
 *.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
 *.out
 
-# Coverage
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Module / dependency cache (do not ignore go.sum)
+/vendor/
+
+# Coverage & profiling
 coverage.*
+*.cov
+*.coverprofile
+*.prof
+
+# Built binary at repo root (keep source under cmd/ip6calc)
+/ip6calc

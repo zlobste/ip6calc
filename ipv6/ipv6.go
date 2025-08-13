@@ -94,7 +94,6 @@ func bytesCompare(a, b []byte) int {
 type CIDR struct {
 	base Address
 	plen int
-	mask net.IPMask
 }
 
 // ParseCIDR parses a CIDR (address/prefix) string.
@@ -111,7 +110,7 @@ func ParseCIDR(s string) (CIDR, error) {
 	if bits != 128 {
 		return CIDR{}, errors.New("not an IPv6 cidr")
 	}
-	return CIDR{base: addr.Mask(ones), plen: ones, mask: n.Mask}, nil
+	return CIDR{base: addr.Mask(ones), plen: ones}, nil
 }
 
 // NewCIDR constructs a canonical CIDR from a base address and prefix length.
@@ -119,8 +118,7 @@ func NewCIDR(base Address, plen int) (CIDR, error) {
 	if plen < 0 || plen > 128 {
 		return CIDR{}, errors.New("invalid prefix length")
 	}
-	mask := net.CIDRMask(plen, 128)
-	return CIDR{base: base.Mask(plen), plen: plen, mask: mask}, nil
+	return CIDR{base: base.Mask(plen), plen: plen}, nil
 }
 
 // String renders network in canonical form.
