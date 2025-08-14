@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"math/bits"
+	"math/rand"
 	"net"
 	"sort"
 	"strings"
@@ -19,7 +21,34 @@ var (
 	ErrInvalidCIDR        = errors.New("ipv6: invalid cidr")
 	ErrInvalidPrefix      = errors.New("ipv6: invalid prefix length")
 	ErrInvalidSplitPrefix = errors.New("ipv6: invalid new prefix")
+	// ErrSplitExcessive indicates a requested split would produce an excessive number of subnets.
+	ErrSplitExcessive = errors.New("ipv6: split produces excessive subnet count")
 )
+
+const (
+	// ByteLen is the length in bytes of an IPv6 address.
+	ByteLen = 16
+	// BitLen is the number of bits in an IPv6 address.
+	BitLen = 128
+)
+
+// precomputed mask table [0..128]
+var maskTable [BitLen + 1][ByteLen]byte
+
+func init() {
+	for plen := 0; plen <= BitLen; plen++ {
+		for i := 0; i < ByteLen; i++ {
+			b := 0
+			bitsLeft := plen - i*8
+			if bitsLeft >= 8 {
+				b = 0xff
+			} else if bitsLeft > 0 {
+				b = 0xff << uint(8-bitsLeft)
+			}
+			maskTable[plen][i] = byte(b)
+		}
+	}
+}
 
 // Address represents a single 128-bit IPv6 address (always a 16-byte value).
 type Address struct {
@@ -57,8 +86,33 @@ func (a Address) Expanded() string {
 	return strings.Join(parts, ":")
 }
 
+// ExpandedUpper returns the fully expanded uppercase hexadecimal form.
+func (a Address) ExpandedUpper() string { return strings.ToUpper(a.Expanded()) }
+
+// MarshalText implements encoding.TextMarshaler.
+func (a Address) MarshalText() ([]byte, error) { return []byte(a.String()), nil }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (a *Address) UnmarshalText(b []byte) error {
+	addr, err := Parse(string(b))
+	if err != nil {
+		return err
+	}
+	*a = addr
+	return nil
+}
+
 // BigInt returns a new big.Int holding the unsigned 128-bit value.
 func (a Address) BigInt() *big.Int { return new(big.Int).SetBytes(a.ip) }
+
+// AddressFromBigInt converts a big.Int (0<=v<2^128) to Address.
+func AddressFromBigInt(v *big.Int) (Address, error) {
+	if v.Sign() < 0 || v.BitLen() > 128 {
+		return Address{}, ErrInvalidAddress
+	}
+	b := v.FillBytes(make([]byte, 16))
+	return NewAddress(net.IP(b))
+}
 
 // internal fast representation helpers
 func (a Address) hiLo() (hi, lo uint64) {
@@ -156,19 +210,41 @@ type CIDR struct {
 
 // ParseCIDR parses a CIDR (address/prefix) string.
 func ParseCIDR(s string) (CIDR, error) {
-	ip, n, err := net.ParseCIDR(strings.TrimSpace(s))
-	if err != nil {
+	// Manual split to distinguish invalid address versus invalid prefix
+	parts := strings.Split(strings.TrimSpace(s), "/")
+	if len(parts) != 2 {
 		return CIDR{}, ErrInvalidCIDR
 	}
-	addr, err := NewAddress(ip)
+	addr, err := Parse(parts[0])
 	if err != nil {
 		return CIDR{}, err
 	}
-	ones, bits := n.Mask.Size()
-	if bits != 128 {
-		return CIDR{}, ErrInvalidCIDR
+	plen, perr := parsePrefix(parts[1])
+	if perr != nil {
+		return CIDR{}, perr
 	}
-	return CIDR{base: addr.Mask(ones), plen: ones}, nil
+	return NewCIDR(addr, plen)
+}
+
+func parsePrefix(p string) (int, error) {
+	if p == "" {
+		return 0, ErrInvalidPrefix
+	}
+	// avoid strconv import here by manual parse (short string, <=3 chars)
+	val := 0
+	for _, r := range p {
+		if r < '0' || r > '9' {
+			return 0, ErrInvalidPrefix
+		}
+		val = val*10 + int(r-'0')
+		if val > BitLen { // early stop
+			return 0, ErrInvalidPrefix
+		}
+	}
+	if val < 0 || val > BitLen {
+		return 0, ErrInvalidPrefix
+	}
+	return val, nil
 }
 
 // NewCIDR constructs a canonical CIDR from a base address and prefix length.
@@ -190,10 +266,13 @@ func (c CIDR) PrefixLength() int { return c.plen }
 
 // Mask returns the address masked to plen bits.
 func (a Address) Mask(plen int) Address {
-	mask := net.CIDRMask(plen, 128)
+	if plen < 0 || plen > BitLen { // validation here to guard table access
+		return a // fallback (will be validated by callers elsewhere)
+	}
 	b := append(net.IP(nil), a.ip...)
-	for i := 0; i < 16; i++ {
-		b[i] &= mask[i]
+	m := maskTable[plen]
+	for i := 0; i < ByteLen; i++ {
+		b[i] &= m[i]
 	}
 	addr, _ := NewAddress(b)
 	return addr
@@ -259,6 +338,9 @@ func (c CIDR) Split(newPrefix int) ([]CIDR, error) {
 		return nil, ErrInvalidSplitPrefix
 	}
 	countBits := newPrefix - c.plen
+	if countBits >= 63 { // guard shift overflow / unrealistic allocation
+		return nil, ErrSplitExcessive
+	}
 	parts := 1 << countBits
 	res := make([]CIDR, 0, parts)
 	step := new(big.Int).Rsh(c.HostCount(), uint(countBits))
@@ -285,6 +367,9 @@ func (c CIDR) SubnetIterator(newPrefix int) (*SubnetIterator, error) {
 		return nil, ErrInvalidSplitPrefix
 	}
 	countBits := newPrefix - c.plen
+	if countBits >= 63 { // avoid overflow
+		return nil, ErrSplitExcessive
+	}
 	parts := 1 << countBits
 	step := new(big.Int).Rsh(c.HostCount(), uint(countBits))
 	return &SubnetIterator{remaining: parts, current: c.base, step: step, plen: newPrefix}, nil
@@ -307,7 +392,7 @@ func Summarize(cidrs []CIDR) []CIDR {
 	if len(cidrs) == 0 {
 		return nil
 	}
-	// normalize and sort
+	// normalize & sort by base then prefix length (shorter first)
 	norm := make([]CIDR, len(cidrs))
 	copy(norm, cidrs)
 	for i := range norm {
@@ -320,31 +405,39 @@ func Summarize(cidrs []CIDR) []CIDR {
 		}
 		return cmp < 0
 	})
-	changed := true
-	for changed {
-		changed = false
-		out := make([]CIDR, 0, len(norm))
-		for i := 0; i < len(norm); {
-			if i+1 < len(norm) && norm[i].plen == norm[i+1].plen {
-				parentPrefix := norm[i].plen - 1
-				if parentPrefix >= 0 {
-					parent1 := norm[i].base.Mask(parentPrefix)
-					parent2 := norm[i+1].base.Mask(parentPrefix)
-					if parent1.Compare(parent2) == 0 && norm[i].Next().base.Compare(norm[i+1].base) == 0 {
-						merged, _ := NewCIDR(parent1, parentPrefix)
-						out = append(out, merged)
-						changed = true
-						i += 2
-						continue
-					}
-				}
-			}
-			out = append(out, norm[i])
-			i++
+	stack := make([]CIDR, 0, len(norm))
+	for _, c := range norm {
+		// skip if contained in previous summarized CIDR
+		if l := len(stack); l > 0 && stack[l-1].ContainsCIDR(c) {
+			continue
 		}
-		norm = out
+		stack = append(stack, c)
+		// attempt upward merges greedily
+		for len(stack) >= 2 {
+			last := stack[len(stack)-1]
+			prev := stack[len(stack)-2]
+			if last.plen != prev.plen {
+				break
+			}
+			if last.plen == 0 { // cannot merge further
+				break
+			}
+			if prev.Next().base.Compare(last.base) != 0 { // not adjacent siblings
+				break
+			}
+			parentPrefix := last.plen - 1
+			parentBase := prev.base.Mask(parentPrefix)
+			// ensure alignment
+			if parentBase.Compare(last.base.Mask(parentPrefix)) != 0 {
+				break
+			}
+			// merge
+			stack = stack[:len(stack)-2]
+			parent, _ := NewCIDR(parentBase, parentPrefix)
+			stack = append(stack, parent)
+		}
 	}
-	return norm
+	return stack
 }
 
 // ReverseDNS returns the ip6.arpa reverse mapping domain name.
@@ -367,10 +460,296 @@ func (a Address) Offset(u uint64) Address {
 
 // Distance returns the unsigned distance between two addresses.
 func Distance(a, b Address) *big.Int {
-	ai := a.BigInt()
-	bi := b.BigInt()
-	if ai.Cmp(bi) > 0 {
-		ai, bi = bi, ai
+	ahi, alo := a.hiLo()
+	bhi, blo := b.hiLo()
+	// ensure a <= b
+	if ahi > bhi || (ahi == bhi && alo > blo) {
+		ahi, alo, bhi, blo = bhi, blo, ahi, alo
 	}
-	return new(big.Int).Sub(bi, ai)
+	var dhi, dlo uint64
+	if blo >= alo {
+		dlo = blo - alo
+		dhi = bhi - ahi
+	} else { // borrow from high word
+		dlo = (blo - alo) // underflow wraps, equivalent to 2^64 + blo - alo
+		dhi = (bhi - 1) - ahi
+	}
+	buf := make([]byte, 16)
+	for i := 7; i >= 0; i-- {
+		buf[i] = byte(dhi)
+		dhi >>= 8
+	}
+	for i := 15; i >= 8; i-- {
+		buf[i] = byte(dlo)
+		dlo >>= 8
+	}
+	return new(big.Int).SetBytes(buf)
+}
+
+// CoverRange returns the minimal set of CIDRs covering the inclusive address range [start,end].
+func CoverRange(start, end Address) ([]CIDR, error) {
+	if start.Compare(end) > 0 {
+		return nil, errors.New("ipv6: invalid range")
+	}
+	var res []CIDR
+	cur := start
+	one := big.NewInt(1)
+	for cur.Compare(end) <= 0 {
+		rem := new(big.Int).Add(Distance(cur, end), one) // remaining count
+		// count trailing zero bits of current address
+		hi, lo := cur.hiLo()
+		var tz int
+		if lo != 0 {
+			tz = bits.TrailingZeros64(lo)
+		} else if hi != 0 {
+			tz = 64 + bits.TrailingZeros64(hi)
+		} else {
+			tz = 128
+		}
+		// largest exponent allowed by remaining size
+		remBits := rem.BitLen() - 1 // floor(log2(rem))
+		if remBits < 0 {
+			remBits = 0
+		}
+		if tz > remBits {
+			tz = remBits
+		}
+		prefix := 128 - tz
+		cid, _ := NewCIDR(cur, prefix)
+		res = append(res, cid)
+		cur = cid.LastHost().Add(one)
+	}
+	return res, nil
+}
+
+// Supernet returns the smallest CIDR containing all provided CIDRs.
+func Supernet(list []CIDR) (CIDR, error) {
+	if len(list) == 0 {
+		return CIDR{}, errors.New("ipv6: empty list")
+	}
+	min := list[0].FirstHost()
+	max := list[0].LastHost()
+	for _, c := range list[1:] {
+		if c.FirstHost().Compare(min) < 0 {
+			min = c.FirstHost()
+		}
+		if c.LastHost().Compare(max) > 0 {
+			max = c.LastHost()
+		}
+	}
+	// find common prefix bits of min & max
+	mb := min.ip
+	xb := max.ip
+	prefix := 0
+	for i := 0; i < 16; i++ {
+		if mb[i] == xb[i] {
+			prefix += 8
+			continue
+		}
+		// differ within this byte
+		for b := 7; b >= 0; b-- {
+			mask := byte(1 << uint(b))
+			if (mb[i] & mask) == (xb[i] & mask) {
+				prefix++
+			} else {
+				break
+			}
+		}
+		break
+	}
+	return NewCIDR(min.Mask(prefix), prefix)
+}
+
+// Random utilities
+
+// RandomAddressInCIDR returns a uniform random address inside CIDR using rand source.
+func RandomAddressInCIDR(c CIDR, r *rand.Rand) Address {
+	// generate offset in host portion bits
+	bits := 128 - c.plen
+	if bits == 0 {
+		return c.base
+	}
+	// produce up to bits random bits as big.Int
+	max := new(big.Int).Lsh(big.NewInt(1), uint(bits))
+	offset := new(big.Int).Rand(r, max)
+	addr := c.base.Add(offset)
+	return addr
+}
+
+// RandomSubnetInCIDR returns a random subnet of newPrefix inside c.
+func RandomSubnetInCIDR(c CIDR, newPrefix int, r *rand.Rand) (CIDR, error) {
+	if newPrefix < c.plen || newPrefix > 128 {
+		return CIDR{}, ErrInvalidSplitPrefix
+	}
+	if newPrefix == c.plen {
+		return c, nil
+	}
+	countBits := newPrefix - c.plen
+	parts := new(big.Int).Lsh(big.NewInt(1), uint(countBits))
+	idx := new(big.Int).Rand(r, parts)
+	step := new(big.Int).Rsh(c.HostCount(), uint(countBits))
+	base := c.base.Add(new(big.Int).Mul(idx, step))
+	return NewCIDR(base, newPrefix)
+}
+
+// ExampleParse demonstrates parsing an IPv6 address.
+func ExampleParse() {
+	addr, _ := Parse("2001:db8::1")
+	fmt.Println(addr.String())
+	// Output: 2001:db8::1
+}
+
+// ExampleParseCIDR shows parsing a CIDR and getting first/last hosts.
+func ExampleParseCIDR() {
+	c, _ := ParseCIDR("2001:db8::/126")
+	fmt.Println(c.FirstHost(), c.LastHost())
+	// Output: 2001:db8:: 2001:db8::3
+}
+
+// ExampleSummarize merges sibling CIDRs.
+func ExampleSummarize() {
+	c1, _ := ParseCIDR("2001:db8::/65")
+	c2 := c1.Next()
+	res := Summarize([]CIDR{c1, c2})
+	for _, r := range res {
+		fmt.Println(r)
+	}
+	// Output: 2001:db8::/64
+}
+
+// ExampleCoverRange demonstrates covering a range with minimal CIDRs.
+func ExampleCoverRange() {
+	a, _ := Parse("2001:db8::1")
+	b, _ := Parse("2001:db8::ff")
+	cover, _ := CoverRange(a, b)
+	fmt.Println(len(cover))
+	// Output: 8
+}
+
+// ExampleSupernet shows computing the smallest CIDR containing others.
+func ExampleSupernet() {
+	c1, _ := ParseCIDR("2001:db8::/65")
+	c2 := c1.Next()
+	s, _ := Supernet([]CIDR{c1, c2})
+	fmt.Println(s)
+	// Output: 2001:db8::/64
+}
+
+// ExampleAddress_Expanded demonstrates uppercase expansion.
+func ExampleAddress_Expanded() {
+	addr, _ := Parse("2001:db8::1")
+	fmt.Println(addr.ExpandedUpper())
+	// Output: 2001:0DB8:0000:0000:0000:0000:0000:0001
+}
+
+// ExampleNewAddress demonstrates constructing an Address from net.IP.
+func ExampleNewAddress() {
+	ip := net.ParseIP("2001:db8::1")
+	addr, _ := NewAddress(ip)
+	fmt.Println(addr)
+	// Output: 2001:db8::1
+}
+
+// ExampleNewCIDR demonstrates constructing a CIDR explicitly.
+func ExampleNewCIDR() {
+	addr, _ := Parse("2001:db8::1")
+	c, _ := NewCIDR(addr, 64)
+	fmt.Println(c)
+	// Output: 2001:db8::/64
+}
+
+// ExampleAddress_Mask shows masking an address to a prefix length.
+func ExampleAddress_Mask() {
+	addr, _ := Parse("2001:db8::1")
+	fmt.Println(addr.Mask(64))
+	// Output: 2001:db8::
+}
+
+// ExampleCIDR_Split demonstrates splitting a small network.
+func ExampleCIDR_Split() {
+	c, _ := ParseCIDR("2001:db8::/126")
+	subs, _ := c.Split(127)
+	for _, s := range subs {
+		fmt.Println(s)
+	}
+	// Output:
+	// 2001:db8::/127
+	// 2001:db8::2/127
+}
+
+// ExampleCIDR_SubnetIterator demonstrates streaming subnets.
+func ExampleCIDR_SubnetIterator() {
+	c, _ := ParseCIDR("2001:db8::/126")
+	it, _ := c.SubnetIterator(127)
+	for {
+		s, ok := it.Next()
+		if !ok {
+			break
+		}
+		fmt.Println(s)
+	}
+	// Output:
+	// 2001:db8::/127
+	// 2001:db8::2/127
+}
+
+// ExampleCIDR_NextPrev shows adjacent network navigation.
+func ExampleCIDR_NextPrev() {
+	c, _ := ParseCIDR("2001:db8::/64")
+	fmt.Println(c.Next())
+	fmt.Println(c.Next().Prev())
+	// Output:
+	// 2001:db8:0:1::/64
+	// 2001:db8::/64
+}
+
+// ExampleCIDR_ContainsAddress shows containment test.
+func ExampleCIDR_ContainsAddress() {
+	c, _ := ParseCIDR("2001:db8::/64")
+	a, _ := Parse("2001:db8::1")
+	b, _ := Parse("2001:db8:0:1::1")
+	fmt.Println(c.ContainsAddress(a))
+	fmt.Println(c.ContainsAddress(b))
+	// Output:
+	// true
+	// false
+}
+
+// ExampleDistance shows distance between two addresses.
+func ExampleDistance() {
+	a, _ := Parse("2001:db8::1")
+	b, _ := Parse("2001:db8::5")
+	fmt.Println(Distance(a, b))
+	// Output: 4
+}
+
+// ExampleAddress_ReverseDNS shows reverse DNS form.
+func ExampleAddress_ReverseDNS() {
+	addr, _ := Parse("2001:db8::1")
+	fmt.Println(addr.ReverseDNS())
+	// Output: 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.
+}
+
+// ExampleAddressFromBigInt demonstrates constructing from integer.
+func ExampleAddressFromBigInt() {
+	addr, _ := AddressFromBigInt(big.NewInt(1))
+	fmt.Println(addr)
+	// Output: ::1
+}
+
+// ExampleRandomAddressInCIDR uses a /128 for deterministic output.
+func ExampleRandomAddressInCIDR() {
+	c, _ := ParseCIDR("2001:db8::1/128")
+	r := rand.New(rand.NewSource(1))
+	fmt.Println(RandomAddressInCIDR(c, r))
+	// Output: 2001:db8::1
+}
+
+// ExampleRandomSubnetInCIDR uses equal newPrefix for deterministic output.
+func ExampleRandomSubnetInCIDR() {
+	c, _ := ParseCIDR("2001:db8::/64")
+	r := rand.New(rand.NewSource(1))
+	s, _ := RandomSubnetInCIDR(c, 64, r)
+	fmt.Println(s)
+	// Output: 2001:db8::/64
 }

@@ -168,3 +168,105 @@ func TestErrorsAndEdges(t *testing.T) {
 		t.Fatal("distance reverse mismatch")
 	}
 }
+
+// Fuzz tests (merged from fuzz_test.go)
+func FuzzParse(f *testing.F) {
+	seeds := []string{"::1", "2001:db8::1", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		addr, err := Parse(in)
+		if err != nil {
+			return
+		}
+		p2, err := Parse(addr.String())
+		if err != nil {
+			t.Fatalf("re-parse failed: %v", err)
+		}
+		if p2.String() != addr.String() {
+			t.Fatalf("roundtrip mismatch %s != %s", p2, addr)
+		}
+	})
+}
+
+func FuzzSummarize(f *testing.F) {
+	f.Add("2001:db8::/64", "2001:db8:0:0:8000::/65")
+	f.Fuzz(func(t *testing.T, a, b string) {
+		c1, err1 := ParseCIDR(a)
+		c2, err2 := ParseCIDR(b)
+		if err1 != nil || err2 != nil {
+			return
+		}
+		list := []CIDR{c1, c2}
+		res := Summarize(list)
+		for _, orig := range list {
+			contained := false
+			for _, s := range res {
+				if s.ContainsCIDR(orig) {
+					contained = true
+					break
+				}
+			}
+			if !contained {
+				t.Fatalf("lost coverage for %v", orig)
+			}
+		}
+	})
+}
+
+func FuzzSplit(f *testing.F) {
+	f.Add("2001:db8::/120", 124)
+	f.Fuzz(func(t *testing.T, cidrStr string, newPrefix int) {
+		c, err := ParseCIDR(cidrStr)
+		if err != nil {
+			return
+		}
+		if newPrefix <= c.plen || newPrefix > 128 || newPrefix-c.plen > 8 {
+			return
+		}
+		subs, err := c.Split(newPrefix)
+		if err != nil {
+			return
+		}
+		for i := 0; i < len(subs); i++ {
+			if !c.ContainsCIDR(subs[i]) {
+				t.Fatalf("sub not contained %v", subs[i])
+			}
+			for j := i + 1; j < len(subs); j++ {
+				if subs[i].Overlaps(subs[j]) {
+					t.Fatalf("overlap %v %v", subs[i], subs[j])
+				}
+			}
+		}
+	})
+}
+
+// Benchmarks (merged from bench_test.go)
+func BenchmarkSplit(b *testing.B) {
+	c, _ := ParseCIDR("2001:db8::/64")
+	for i := 0; i < b.N; i++ {
+		_, _ = c.Split(68)
+	}
+}
+func BenchmarkSummarize(b *testing.B) {
+	base, _ := ParseCIDR("2001:db8::/64")
+	subs, _ := base.Split(68)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Summarize(subs)
+	}
+}
+func BenchmarkDistance(b *testing.B) {
+	a, _ := Parse("2001:db8::1")
+	c := a.Add(big.NewInt(1 << 32))
+	for i := 0; i < b.N; i++ {
+		_ = Distance(a, c)
+	}
+}
+func BenchmarkReverseDNS(b *testing.B) {
+	a, _ := Parse("2001:db8::1")
+	for i := 0; i < b.N; i++ {
+		_ = a.ReverseDNS()
+	}
+}

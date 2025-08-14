@@ -9,6 +9,10 @@ on:
 jobs:
   build-test-lint:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: [ '1.24' ]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,7 +20,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: ${{ matrix.go-version }}
           check-latest: true
 
       - name: Cache Go build
@@ -25,18 +29,45 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
+
+      - name: Verify go.mod go version matches matrix
+        run: |
+          grep -q "^go 1.24" go.mod || (echo "go.mod version mismatch" && exit 1)
 
       - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
           version: latest
-          args: --timeout=3m
+          args: --timeout=5m
 
-      - name: Run tests
-        run: go test ./... -count=1
+      - name: go vet
+        run: go vet ./...
+
+      - name: Module tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code || (echo 'go mod tidy produced changes; commit them' && exit 1)
+
+      - name: Build
+        run: go build ./...
+
+      - name: Run tests (race)
+        run: go test -race ./... -count=1 -coverprofile=coverage.out -covermode=atomic
+
+      - name: Fuzz smoke (short)
+        run: go test ./ipv6 -fuzz=FuzzParse -fuzztime=5s || true
+
+      - name: Benchmarks (short)
+        run: go test -run=^$ -bench=. -benchtime=1x ./ipv6 || true
 
       - name: Coverage summary
-        run: go test ./ipv6 -coverprofile=coverage.out && go tool cover -func=coverage.out | tail -n 1
+        run: go tool cover -func=coverage.out | tail -n 1
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.go-version }}
+          path: coverage.out

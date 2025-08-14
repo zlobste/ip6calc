@@ -1,0 +1,100 @@
+project_name: ip6calc
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ip6calc
+    main: ./cmd/ip6calc
+    binary: ip6calc
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/zlobste/ip6calc/internal/cli.Version={{.Version}} -X github.com/zlobste/ip6calc/internal/cli.Commit={{.Commit}} -X github.com/zlobste/ip6calc/internal/cli.BuildDate={{.Date}}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    flags:
+      - -trimpath
+
+archives:
+  - id: archive
+    builds: [ip6calc]
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+      - SECURITY.md
+      - CONTRIBUTING.md
+    replacements:
+      darwin: macOS
+    wrap_in_directory: true
+
+checksum:
+  name_template: 'checksums.txt'
+
+sboms:
+  - id: sbom-archives
+    artifacts: archive
+
+signs:
+  - artifacts: checksum
+    cmd: cosign
+    args:
+      - sign-blob
+      - '--output'
+      - '${signature}'
+      - '--yes'
+      - '${artifact}'
+    signature: '${artifact}.sig'
+    env:
+      - COSIGN_EXPERIMENTAL=1
+
+brews:
+  - name: ip6calc
+    repository:
+      owner: zlobste
+      name: homebrew-tap
+    directory: Formula
+    commit_author:
+      name: goreleaser
+      email: noreply@example.com
+    homepage: https://github.com/zlobste/ip6calc
+    description: IPv6 subnet calculator and Go library
+    license: MIT
+    test: |
+      system "#{bin}/ip6calc", "version"
+    install: |
+      bin.install "ip6calc"
+    skip_upload: false
+
+scoop:
+  bucket:
+    owner: zlobste
+    name: scoop-bucket
+  commit_author:
+    name: goreleaser
+    email: noreply@example.com
+  homepage: https://github.com/zlobste/ip6calc
+  description: IPv6 subnet calculator and Go library
+  license: MIT
+  persist: []
+  shortcut: []
+
+release:
+  draft: false
+  prerelease: auto
+  mode: replace
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'

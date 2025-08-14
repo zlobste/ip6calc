@@ -1,147 +1,158 @@
 # ip6calc
 
-IPv6 subnet calculator and Go library. Command line tool plus package for parsing, formatting, subnet math, summarization and basic analysis of IPv6 networks.
+IPv6 subnet calculator and Go library. Provides fast, well‑tested primitives for IPv6 address parsing, formatting, arithmetic, subnetting, summarization and range coverage, plus an ergonomic CLI. (Requires Go 1.24+)
 
-## Features
-- Parse / validate IPv6 addresses and CIDRs (sentinel errors: ErrInvalidAddress, ErrInvalidCIDR, etc.)
-- Expand / compress addresses
-- Network base, first, last, count of addresses
-- Address arithmetic (add / subtract / offset) (library) with fast uint64 paths
-- Adjacent network navigation (next / prev) (library)
-- Split a network into smaller subnets (iterator or full slice)
-- Summarize sibling networks
-- Containment and overlap checks (library) with simplified interval overlap logic
-- Reverse DNS (ip6.arpa) name generation
-- Output: human (line-per-item lists), JSON, YAML
-- Shell completion scripts (bash, zsh, fish, powershell)
-- Man page generation command
-- Version command (build-time ldflags)
-- Property based tests for address round‑trip
+[![CI](https://github.com/zlobste/ip6calc/actions/workflows/ci.yml/badge.svg)](https://github.com/zlobste/ip6calc/actions/workflows/ci.yml)
 
 ## Install
-CLI:
 ```
 go install github.com/zlobste/ip6calc/cmd/ip6calc@latest
 ```
-The binary is placed in $GOBIN (or $GOPATH/bin if GOBIN is unset). Ensure that directory is on PATH.
-
-Library: import the package and Go will add the module automatically.
+Library import path:
 ```
 import "github.com/zlobste/ip6calc/ipv6"
 ```
 
-## CLI
-Usage:
+## Quick CLI Usage
 ```
 ip6calc <command> [args] [-o human|json|yaml]
 ```
-Commands:
-- info        show details for an address or CIDR
-- expand      expanded form of an address
-- compress    compressed form
-- split       split a CIDR into smaller prefixes (requires --new-prefix > original)
-- summarize   merge a set of CIDRs
-- reverse     ip6.arpa reverse DNS name
-- version     print version info
-- completion  generate shell completion script
-- man         generate man pages into a directory
+Common commands: `info`, `expand`, `compress`, `split`, `summarize`, `range`, `supernet`, `enumerate`, `random address`, `random subnet`, `diff`, `reverse`, `to-int`, `from-int`, `completion`, `docs`.
 
-Examples:
-```
+### CLI Examples
+```bash
 # Network info
 ip6calc info 2001:db8::/64
-
-# Address info
-ip6calc info 2001:db8::1
 
 # Expand / compress
 ip6calc expand 2001:db8::1
 ip6calc compress 2001:0db8:0000:0000:0000:0000:0000:0001
 
-# Split /48 into /52
+# Split / summarize
 ip6calc split 2001:db8::/48 --new-prefix 52
+ip6calc summarize 2001:db8::/65 2001:db8:0:0:8000::/65
 
-# Summarize siblings
-ip6calc summarize 2001:db8::/52 2001:db8:0:1000::/52 2001:db8:0:2000::/52 2001:db8:0:3000::/52
+# Cover range, supernet
+ip6calc range 2001:db8::1-2001:db8::ff
+ip6calc supernet 2001:db8::/65 2001:db8:0:0:8000::/65
 
-# Reverse DNS
-ip6calc reverse 2001:db8::1
+# Enumerate & random
+ip6calc enumerate 2001:db8::/64 --limit 5 --stride 32
+ip6calc random address 2001:db8::/64 --count 3
 
-# JSON output
-ip6calc info 2001:db8::/64 -o json
+# Diff & reverse DNS
+ip6calc diff 2001:db8::/65 2001:db8::/64
+ip6calc reverse 2001:db8::1 --zone
 
-# Generate bash completion
-ip6calc completion bash > /etc/bash_completion.d/ip6calc
+# Integer conversion
+ip6calc to-int 2001:db8::1 | ip6calc from-int
 
-# Generate man pages
-ip6calc man ./manpages
-
-# Version
-ip6calc version
+# JSON output (or set IP6CALC_FORMAT)
+ip6calc -o json info 2001:db8::/64
 ```
 
-## Library
-Constructor pattern for CLI embedding:
+## Library Usage
 ```go
-cmd := cli.NewRootCmd(os.Stdout)
-cmd.Execute()
-```
-Basic inspection:
-```go
-cidr, _ := ipv6.ParseCIDR("2001:db8::/64")
-fmt.Println(cidr.Network())
-fmt.Println(cidr.FirstHost())
-fmt.Println(cidr.LastHost())
-fmt.Println(cidr.HostCount())
-```
-Subnet iteration (memory efficient):
-```go
-c, _ := ipv6.ParseCIDR("2001:db8::/120")
-it, _ := c.SubnetIterator(124)
-for {
-  sub, ok := it.Next()
-  if !ok { break }
-  fmt.Println(sub)
+package main
+
+import (
+	"fmt"
+	"math/big"
+
+	"github.com/zlobste/ip6calc/ipv6"
+)
+
+func main() {
+	// Parse address & CIDR
+	addr, err := ipv6.Parse("2001:db8::1")
+	if err != nil { panic(err) }
+	cidr, err := ipv6.ParseCIDR("2001:db8::/64")
+	if err != nil { panic(err) }
+
+	fmt.Println("Compressed:", addr)                // 2001:db8::1
+	fmt.Println("Expanded:", addr.Expanded())       // 2001:0db8:...
+	fmt.Println("Host count:", cidr.HostCount())
+	fmt.Println("First/Last:", cidr.FirstHost(), cidr.LastHost())
+
+	// Arithmetic
+	plus10 := addr.Add(big.NewInt(10))
+	fmt.Println("+10:", plus10)
+	fmt.Println("Distance:", ipv6.Distance(addr, plus10))
+
+	// Split
+	subs, _ := cidr.Split(68) // slice of sub-CIDRs
+	fmt.Println("First subnet:", subs[0])
+
+	// Summarize
+	merged := ipv6.Summarize([]ipv6.CIDR{subs[0], subs[1]})
+	fmt.Println("Summarized count:", len(merged))
+
+	// Cover range with minimal CIDRs
+	start, _ := ipv6.Parse("2001:db8::1")
+	end, _ := ipv6.Parse("2001:db8::ff")
+	cover, _ := ipv6.CoverRange(start, end)
+	fmt.Println("Range blocks:", len(cover))
+
+	// Supernet
+	sn, _ := ipv6.Supernet([]ipv6.CIDR{subs[0], subs[1]})
+	fmt.Println("Supernet:", sn)
 }
 ```
-Summarize:
-```go
-c1, _ := ipv6.ParseCIDR("2001:db8::/65")
-c2 := c1.Next()
-fmt.Println(ipv6.Summarize([]ipv6.CIDR{c1, c2})) // [2001:db8::/64]
-```
-Distance:
-```go
-a1, _ := ipv6.Parse("2001:db8::1")
-a2, _ := ipv6.Parse("2001:db8::ffff")
-fmt.Println(ipv6.Distance(a1, a2))
-```
-Containment:
-```go
-outer, _ := ipv6.ParseCIDR("2001:db8::/48")
-inner, _ := ipv6.ParseCIDR("2001:db8:0:1::/64")
-fmt.Println(outer.ContainsCIDR(inner))
-```
+(Always check returned errors in production code.)
 
-## Output Formats
-Default is human-readable. Use `-o json` or `-o yaml` for structured output.
-Lists (e.g. split results) print one item per line in human mode.
+### Key Types & Functions
+- `Address` (methods: `String()`, `Expanded()`, `ExpandedUpper()`, `Add()`, `Sub()`, `BigInt()`, `Mask()`, `ReverseDNS()`).
+- `CIDR` (methods: `Base()`, `PrefixLength()`, `HostCount()`, `FirstHost()`, `LastHost()`, `Split()`, `SubnetIterator()`, `ContainsAddress()`, `ContainsCIDR()`, `Overlaps()`, `Next()`, `Prev()`).
+- Helpers: `Parse`, `ParseCIDR`, `Summarize`, `CoverRange`, `Supernet`, `Distance`, `RandomAddressInCIDR`, `RandomSubnetInCIDR`, `AddressFromBigInt`.
 
-## Version Info
-Injected at build time:
-```
-go build -ldflags "-X github.com/zlobste/ip6calc/internal/cli.Version=v1.2.3" ./cmd/ip6calc
-```
+## Feature Summary
+- Robust IPv6 parsing & validation (distinct sentinel errors).
+- Lossless expand / compress and uppercase expansion.
+- Network metrics: host counts (raw, power-of-two notation, approximate).
+- Fast arithmetic (dual uint64 fast paths; big.Int fallback).
+- Splitting with iterator & safeguards (`--force` for very large splits; thresholds overridable by env vars `IP6CALC_SPLIT_WARN_THRESHOLD`, `IP6CALC_SPLIT_FORCE_THRESHOLD`).
+- Summarization (greedy merge of sibling CIDRs) & supernet calculation.
+- Minimal CIDR cover for arbitrary address ranges.
+- Enumeration (limit/stride) & random sampling (non‑cryptographic `math/rand`).
+- Overlap / containment / diff analysis and reverse DNS generation.
+- Integer ↔ IPv6 conversions; structured JSON/YAML schema wrapper: `{"schema":"ip6calc/v1","data":...}`.
+- TTY‑friendly human output: optional color (`--color`), tables (`--table`), quiet (`--quiet`), header suppression (`--no-header`), uppercase (`--upper`).
 
-## Testing
+## Exit Codes
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 2 | Invalid input (address/prefix) |
+| 3 | Overlap detected (with `--fail-on-overlap`) |
+| 4 | Split too large without `--force` |
+
+## Environment Variables
+- `IP6CALC_FORMAT` sets default output format.
+- `IP6CALC_SPLIT_WARN_THRESHOLD` / `IP6CALC_SPLIT_FORCE_THRESHOLD` adjust split safeguards.
+
+## Testing & Benchmarks
 ```
-go test ./...
+go test ./... -cover
+# Fuzz (example)
+go test -fuzz=FuzzParse -run=^$ ./ipv6
+# Benchmarks
+go test -bench=. ./ipv6
 ```
-Coverage report:
-```
-go test ./ipv6 -coverprofile=coverage.out
-go tool cover -func=coverage.out
-```
+Core logic targets >90% coverage (property-based + fuzz tests included).
+
+## Security Notes
+- Input validation avoids panics; big integer bounds (<2^128) enforced.
+- Random address/subnet functions are NOT cryptographically secure.
+- Report vulnerabilities privately (see SECURITY.md).
+
+## Contributing
+1. Open an issue for major changes.
+2. `go fmt`, `go vet`, lint (`golangci-lint run`) before PR.
+3. Include tests (unit + fuzz where beneficial).
+4. Keep PRs focused; maintain >90% coverage for core paths.
 
 ## License
-MIT (see LICENSE file)
+MIT (see `LICENSE`).
+
+---
+If this project helps you, a GitHub star is appreciated.
