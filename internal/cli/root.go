@@ -147,14 +147,7 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 		w := rootCmd.OutOrStdout()
 		schemaWrap := func(obj any) any {
 			if format == outJSON || format == outYAML {
-				if m, ok := obj.(map[string]any); ok {
-					merged := make(map[string]any, len(m)+1)
-					for k, v := range m {
-						merged[k] = v
-					}
-					merged["schema"] = "ip6calc/v1"
-					return merged
-				}
+				// Always wrap consistently to avoid key collision and provide predictable shape.
 				return map[string]any{"schema": "ip6calc/v1", "data": obj}
 			}
 			return obj
@@ -164,6 +157,7 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 			if flagQuiet {
 				return nil
 			}
+			// Stable, readable rendering for []string and map[string]any
 			rv := reflect.ValueOf(v)
 			if rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() == reflect.String {
 				if flagTable {
@@ -187,6 +181,20 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 				}
 				for i := 0; i < rv.Len(); i++ {
 					if _, err := fmt.Fprintln(w, rv.Index(i).Interface()); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			if m, ok := v.(map[string]any); ok {
+				// stable key order
+				keys := make([]string, 0, len(m))
+				for k := range m {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					if _, err := fmt.Fprintf(w, "%s: %v\n", k, m[k]); err != nil {
 						return err
 					}
 				}
@@ -323,7 +331,7 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 		}
 		// delegate capacity / sanity checks to library after computing diff
 		diff := newPrefix - c.PrefixLength()
-		if diff >= 63 { // early guard matching library
+		if diff >= 63 { // matches library guard preventing overflow & unrealistic splits
 			return ipv6.ErrSplitExcessive
 		}
 		// compute parts using uint64 for safety
@@ -378,7 +386,7 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 		}
 		return render(list)
 	}}
-	splitCmd.Flags().Int("new-prefix", 0, "new prefix length to split into (must be larger than original)")
+	splitCmd.Flags().Int("new-prefix", 0, "new prefix length to split into (must be >= original prefix)")
 	splitCmd.Flags().Bool("force", false, "proceed even if subnet count exceeds large threshold")
 
 	summarizeCmd := &cobra.Command{Use: "summarize <CIDR...>", Short: "Summarize a list of CIDRs", Args: cobra.MinimumNArgs(1), Example: "  ip6calc summarize 2001:db8::/65 2001:db8:0:0:8000::/65", RunE: func(cmd *cobra.Command, args []string) error {
@@ -407,7 +415,7 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 		}
 		return render(list)
 	}}
-	summarizeCmd.Flags().Bool("fail-on-overlap", false, "fail if any overlapping (non-contained) CIDRs present")
+	summarizeCmd.Flags().Bool("fail-on-overlap", false, "fail if any overlap (including containment) present")
 
 	reverseCmd := &cobra.Command{Use: "reverse <IPv6 address>", Short: "Produce reverse DNS ip6.arpa name", Args: cobra.ExactArgs(1), Example: "  ip6calc reverse 2001:db8::1\n  ip6calc reverse --zone 2001:db8::1", RunE: func(cmd *cobra.Command, args []string) error {
 		zone, _ := cmd.Flags().GetBool("zone")
@@ -548,6 +556,9 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 		if newPrefix == 0 {
 			return errors.New("--new-prefix required")
 		}
+		if newPrefix < c.PrefixLength() || newPrefix > 128 {
+			return fmt.Errorf("invalid --new-prefix: must be >= %d and <=128", c.PrefixLength())
+		}
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		var list []string
 		for i := 0; i < count; i++ {
@@ -581,16 +592,24 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 		type gap struct{ Start, End string }
 		var overlaps []string
 		var gaps []gap
+		one := big.NewInt(1)
+		isZero := func(a ipv6.Address) bool { return a.BigInt().Sign() == 0 }
+		max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+		isMax := func(a ipv6.Address) bool { return a.BigInt().Cmp(max) == 0 }
 		for i := 0; i < len(list)-1; i++ {
 			a := list[i]
 			b := list[i+1]
 			if a.Overlaps(b) {
 				overlaps = append(overlaps, fmt.Sprintf("%s %s", a, b))
 			} else {
-				ga := a.LastHost().Add(big.NewInt(1))
-				gb := b.FirstHost().Sub(big.NewInt(1))
-				if ga.Compare(gb) <= 0 {
-					gaps = append(gaps, gap{ga.String(), gb.String()})
+				lastA := a.LastHost()
+				firstB := b.FirstHost()
+				if lastA.Compare(firstB) < 0 && !isMax(lastA) && !isZero(firstB) { // only if real space between and no wrap risk
+					ga := lastA.Add(one)
+					gb := firstB.Sub(one)
+					if ga.Compare(gb) <= 0 { // still non-empty
+						gaps = append(gaps, gap{ga.String(), gb.String()})
+					}
 				}
 			}
 		}

@@ -273,6 +273,10 @@ func TestJSONHostCountFields(t *testing.T) {
 			t.Fatalf("unmarshal failed: %v", err2)
 		}
 	}
+	// unwrap data wrapper if present
+	if data, ok := m["data"].(map[string]any); ok {
+		m = data
+	}
 	for _, k := range []string{"host_count", "host_count_power", "host_count_approx"} {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("missing field %s", k)
