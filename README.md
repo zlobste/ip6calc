@@ -51,6 +51,14 @@ ip6calc to-int 2001:db8::1 | ip6calc from-int
 ip6calc -o json info 2001:db8::/64
 ```
 
+## Full CLI Reference
+See the generated per-command Markdown docs in [docs/cli/](docs/cli/). For example: [ip6calc split](docs/cli/ip6calc_split.md), [ip6calc summarize](docs/cli/ip6calc_summarize.md), etc.
+
+Regenerate them after changing commands:
+```
+ip6calc docs docs/cli
+```
+
 ## Library Usage
 ```go
 package main
