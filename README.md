@@ -1,8 +1,8 @@
 # ip6calc
 
-IPv6 subnet calculator and Go library. Provides fast, well‑tested primitives for IPv6 address parsing, formatting, arithmetic, subnetting, summarization and range coverage, plus an ergonomic CLI. (Requires Go 1.24+)
+IPv6 subnet calculator and Go library. Provides fast, well‑tested primitives for IPv6 address parsing, formatting, arithmetic, subnetting, summarization and range coverage, plus an ergonomic CLI.
 
-[![CI](https://github.com/zlobste/ip6calc/actions/workflows/ci.yml/badge.svg)](https://github.com/zlobste/ip6calc/actions/workflows/ci.yml)
+[![CI](https://github.com/zlobste/ip6calc/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zlobste/ip6calc/actions/workflows/ci.yml?query=branch%3Amain)
 
 ## Install
 ```
