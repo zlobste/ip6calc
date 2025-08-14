@@ -30,6 +30,9 @@ const (
 	ByteLen = 16
 	// BitLen is the number of bits in an IPv6 address.
 	BitLen = 128
+	// MaxSplitParts is an upper safety cap on the number of subnets a Split/Iterator will generate
+	// to avoid pathological memory / time usage. (1<<20 ~= 1M subnets)
+	MaxSplitParts = 1 << 20
 )
 
 // precomputed mask table [0..128]
@@ -138,8 +141,11 @@ func fromHiLo(hi, lo uint64) Address {
 	return addr
 }
 
-// Add returns a+delta (mod 2^128).
+// Add returns a+delta (mod 2^128). Negative deltas are treated as subtraction.
 func (a Address) Add(delta *big.Int) Address {
+	if delta.Sign() < 0 {
+		return a.Sub(new(big.Int).Abs(delta))
+	}
 	// fast path for <=64-bit delta
 	if delta.BitLen() <= 64 {
 		hi, lo := a.hiLo()
@@ -162,23 +168,32 @@ func (a Address) Add(delta *big.Int) Address {
 
 // Sub returns a-delta (mod 2^128).
 func (a Address) Sub(delta *big.Int) Address {
+	if delta.Sign() < 0 { // subtracting a negative => addition
+		return a.Add(new(big.Int).Abs(delta))
+	}
 	// fast path for <=64-bit delta
 	if delta.BitLen() <= 64 {
-		if delta.Sign() < 0 { // negative, fallback to Add logic
-			return a.Add(new(big.Int).Neg(delta))
-		}
 		// perform subtraction in hi/lo
 		hi, lo := a.hiLo()
 		d := delta.Uint64()
 		if lo >= d {
 			lo = lo - d
 		} else {
-			lo = (lo - d) // will wrap automatically
+			lo = (lo - d) // wrap
 			hi--
 		}
 		return fromHiLo(hi, lo)
 	}
-	return a.Add(new(big.Int).Neg(delta))
+	// big path
+	mod := new(big.Int).Lsh(big.NewInt(1), 128)
+	v := a.BigInt()
+	v.Sub(v, delta)
+	if v.Sign() < 0 { // wrap
+		v.Add(v, mod)
+	}
+	b := v.FillBytes(make([]byte, 16))
+	addr, _ := NewAddress(b)
+	return addr
 }
 
 // Compare performs lexicographic comparison: -1 if a<b, 0 if equal, 1 if a>b.
@@ -264,10 +279,10 @@ func (c CIDR) Base() Address { return c.base }
 // PrefixLength returns the prefix length.
 func (c CIDR) PrefixLength() int { return c.plen }
 
-// Mask returns the address masked to plen bits.
+// Mask returns the address masked to plen bits. Panics if plen is invalid.
 func (a Address) Mask(plen int) Address {
-	if plen < 0 || plen > BitLen { // validation here to guard table access
-		return a // fallback (will be validated by callers elsewhere)
+	if plen < 0 || plen > BitLen {
+		panic("ipv6: invalid prefix length in Mask")
 	}
 	b := append(net.IP(nil), a.ip...)
 	m := maskTable[plen]
@@ -332,20 +347,26 @@ func (c CIDR) Prev() CIDR {
 	return res
 }
 
-// Split divides the network into subnets of newPrefix length.
+// Split divides the network into subnets of newPrefix length. Allows newPrefix == c.plen (returns self).
 func (c CIDR) Split(newPrefix int) ([]CIDR, error) {
-	if newPrefix <= c.plen || newPrefix > 128 {
+	if newPrefix < c.plen || newPrefix > 128 {
 		return nil, ErrInvalidSplitPrefix
+	}
+	if newPrefix == c.plen { // degenerate split: single subnet
+		return []CIDR{c}, nil
 	}
 	countBits := newPrefix - c.plen
 	if countBits >= 63 { // guard shift overflow / unrealistic allocation
 		return nil, ErrSplitExcessive
 	}
-	parts := 1 << countBits
+	parts := uint64(1) << uint(countBits)
+	if parts > MaxSplitParts { // safety cap
+		return nil, ErrSplitExcessive
+	}
 	res := make([]CIDR, 0, parts)
 	step := new(big.Int).Rsh(c.HostCount(), uint(countBits))
 	cur := c.base
-	for i := 0; i < parts; i++ {
+	for i := uint64(0); i < parts; i++ {
 		sub, _ := NewCIDR(cur, newPrefix)
 		res = append(res, sub)
 		cur = cur.Add(step)
@@ -361,18 +382,24 @@ type SubnetIterator struct {
 	plen      int
 }
 
-// SubnetIterator returns an iterator for subnets at newPrefix.
+// SubnetIterator returns an iterator for subnets at newPrefix. Allows equality (single subnet iteration).
 func (c CIDR) SubnetIterator(newPrefix int) (*SubnetIterator, error) {
-	if newPrefix <= c.plen || newPrefix > 128 {
+	if newPrefix < c.plen || newPrefix > 128 {
 		return nil, ErrInvalidSplitPrefix
 	}
+	if newPrefix == c.plen {
+		return &SubnetIterator{remaining: 1, current: c.base, step: new(big.Int), plen: newPrefix}, nil
+	}
 	countBits := newPrefix - c.plen
-	if countBits >= 63 { // avoid overflow
+	if countBits >= 63 {
 		return nil, ErrSplitExcessive
 	}
-	parts := 1 << countBits
+	parts := uint64(1) << uint(countBits)
+	if parts > MaxSplitParts {
+		return nil, ErrSplitExcessive
+	}
 	step := new(big.Int).Rsh(c.HostCount(), uint(countBits))
-	return &SubnetIterator{remaining: parts, current: c.base, step: step, plen: newPrefix}, nil
+	return &SubnetIterator{remaining: int(parts), current: c.base, step: step, plen: newPrefix}, nil
 }
 
 // Next returns next subnet and true, or zero value and false when done.

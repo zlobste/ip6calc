@@ -55,6 +55,11 @@ var (
 // Custom error for oversized split operations requiring --force.
 var ErrSplitTooLarge = errors.New("split: too many subnets without --force")
 
+// OverlapError indicates CIDR overlap when --fail-on-overlap is requested.
+type OverlapError struct{ A, B ipv6.CIDR }
+
+func (e OverlapError) Error() string { return fmt.Sprintf("overlap detected: %s %s", e.A, e.B) }
+
 // Exit codes for different error classes.
 const (
 	exitCodeInvalidInput = 2
@@ -305,6 +310,7 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 		return render(list)
 	}}
 
+	// Split command adjusted to allow equal new-prefix and handle ErrSplitExcessive.
 	splitCmd := &cobra.Command{Use: "split <IPv6 CIDR>", Short: "Split a network into smaller subnets", Args: cobra.ExactArgs(1), Example: "  # Split /48 into /52\n  ip6calc split 2001:db8::/48 --new-prefix 52", RunE: func(cmd *cobra.Command, args []string) error {
 		newPrefix, _ := cmd.Flags().GetInt("new-prefix")
 		force, _ := cmd.Flags().GetBool("force")
@@ -312,31 +318,36 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if newPrefix == 0 || newPrefix <= c.PrefixLength() || newPrefix > 128 {
-			return fmt.Errorf("invalid --new-prefix: must be > original (%d) and <=128", c.PrefixLength())
+		if newPrefix < c.PrefixLength() || newPrefix > 128 {
+			return fmt.Errorf("invalid --new-prefix: must be >= original (%d) and <=128", c.PrefixLength())
 		}
+		// delegate capacity / sanity checks to library after computing diff
 		diff := newPrefix - c.PrefixLength()
-		if diff >= 63 { // guard before shift / allocation
+		if diff >= 63 { // early guard matching library
 			return ipv6.ErrSplitExcessive
 		}
-		parts := 1 << diff
+		// compute parts using uint64 for safety
+		parts := uint64(1)
+		if diff > 0 {
+			parts = uint64(1) << uint(diff)
+		}
 		warnThreshold := getThreshold("IP6CALC_SPLIT_WARN_THRESHOLD", defaultSplitWarnThreshold)
 		forceThreshold := getThreshold("IP6CALC_SPLIT_FORCE_THRESHOLD", defaultSplitForceThreshold)
-		if parts > forceThreshold && !force {
+		if parts > uint64(forceThreshold) && !force {
 			return ErrSplitTooLarge
 		}
-		if parts > warnThreshold && format == outHuman && !force {
+		if parts > uint64(warnThreshold) && format == outHuman && !force && diff > 0 {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: generating %d subnets (use --force to suppress)\n", parts)
 		}
 		// For very large outputs, stream instead of buffering entire slice for human output.
-		streamThreshold := forceThreshold / 2
-		if parts > streamThreshold && format == outHuman && !force && !flagTable {
+		streamThreshold := uint64(forceThreshold) / 2
+		if parts > streamThreshold && format == outHuman && !force && !flagTable && diff > 0 {
 			it, err := c.SubnetIterator(newPrefix)
 			if err != nil {
 				return err
 			}
 			w := rootCmd.OutOrStdout()
-			progressEvery := parts / 10
+			progressEvery := int(parts / 10)
 			if progressEvery == 0 {
 				progressEvery = 1
 			}
@@ -350,23 +361,20 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 				if _, err := fmt.Fprintln(w, sub.String()); err != nil {
 					return err
 				}
-				if count%progressEvery == 0 {
+				if count%progressEvery == 0 && parts > 1 {
 					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "progress: %d/%d (%.0f%%)\n", count, parts, float64(count)*100/float64(parts))
 				}
 			}
 			return nil
 		}
-		it, err := c.SubnetIterator(newPrefix)
+		// Use library Split (handles equality case now)
+		subs, err := c.Split(newPrefix)
 		if err != nil {
 			return err
 		}
 		var list []string
-		for {
-			sub, ok := it.Next()
-			if !ok {
-				break
-			}
-			list = append(list, sub.String())
+		for _, s := range subs {
+			list = append(list, s.String())
 		}
 		return render(list)
 	}}
@@ -387,7 +395,7 @@ func NewRootCmd(out io.Writer) *cobra.Command {
 			for i := 0; i < len(cidrs); i++ {
 				for j := i + 1; j < len(cidrs); j++ {
 					if cidrs[i].Overlaps(cidrs[j]) { // treat any overlap (including containment) as error
-						return fmt.Errorf("overlap detected: %s %s", cidrs[i], cidrs[j])
+						return OverlapError{cidrs[i], cidrs[j]}
 					}
 				}
 			}
@@ -654,7 +662,7 @@ func Execute() {
 			code = exitCodeInvalidInput
 		case errors.Is(err, ErrSplitTooLarge), errors.Is(err, ipv6.ErrSplitExcessive):
 			code = exitCodeSplitTooBig
-		case strings.Contains(err.Error(), "overlap detected"):
+		case errors.As(err, new(OverlapError)):
 			code = exitCodeOverlap
 		}
 		fmt.Fprintf(os.Stderr, "ip6calc: %v\n", err)

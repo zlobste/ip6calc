@@ -169,6 +169,54 @@ func TestErrorsAndEdges(t *testing.T) {
 	}
 }
 
+func TestAddNegativeDelta(t *testing.T) {
+	addr, _ := Parse("::5")
+	res := addr.Add(big.NewInt(-3))
+	if res.String() != "::2" {
+		t.Fatalf("expected ::2 got %s", res)
+	}
+}
+
+func TestSplitEquality(t *testing.T) {
+	c, _ := ParseCIDR("2001:db8::/64")
+	subs, err := c.Split(64)
+	if err != nil || len(subs) != 1 || subs[0].String() != c.String() {
+		t.Fatalf("split equality failed: %v %v", subs, err)
+	}
+	it, err := c.SubnetIterator(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, ok := it.Next()
+	if !ok || one.String() != c.String() {
+		t.Fatalf("iterator equality failed: %v %v", one, ok)
+	}
+	_, ok = it.Next()
+	if ok {
+		t.Fatal("iterator should be exhausted")
+	}
+}
+
+func TestMaskInvalidPanics(t *testing.T) {
+	addr, _ := Parse("::1")
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for invalid Mask prefix")
+		}
+	}()
+	_ = addr.Mask(129)
+}
+
+func TestSplitCap(t *testing.T) {
+	c, _ := ParseCIDR("2001:db8::/64")
+	// attempt absurd split beyond MaxSplitParts (choose prefix far enough)
+	badPrefix := c.plen + 30 // 1<<30 > MaxSplitParts (1<<20)
+	_, err := c.Split(badPrefix)
+	if err == nil {
+		t.Fatalf("expected excessive split error")
+	}
+}
+
 // Fuzz tests (merged from fuzz_test.go)
 func FuzzParse(f *testing.F) {
 	seeds := []string{"::1", "2001:db8::1", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}

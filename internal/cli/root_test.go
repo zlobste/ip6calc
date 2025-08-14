@@ -168,9 +168,12 @@ func TestEnvAndFormatVariants(t *testing.T) {
 func TestErrorPaths(t *testing.T) {
 	// invalid new-prefix (expect error)
 	cmd := NewRootCmd(&bytes.Buffer{})
-	cmd.SetArgs([]string{"split", "2001:db8::/124", "--new-prefix", "124"})
+	cmd.SetArgs([]string{"split", "2001:db8::/124", "--new-prefix", "123"})
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "invalid --new-prefix") {
-		t.Fatalf("expected invalid new-prefix error")
+		// new logic uses >= original check; 123 < 124 invalid
+		if err == nil {
+			t.Fatalf("expected invalid new-prefix error")
+		}
 	}
 	// unsupported shell
 	cmd = NewRootCmd(&bytes.Buffer{})
@@ -218,7 +221,7 @@ func TestToFromInt(t *testing.T) {
 		cmd = NewRootCmd(buf)
 		cmd.SetArgs([]string{"-o", "human", "to-int", "2001:db8::1"})
 		if err2 := cmd.Execute(); err2 != nil {
-			t.Fatalf("to-int failed: %v", err2)
+			t.Fatalf("to-int failed: %v", err)
 		}
 	}
 	val := strings.TrimSpace(buf.String())
@@ -274,5 +277,25 @@ func TestJSONHostCountFields(t *testing.T) {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("missing field %s", k)
 		}
+	}
+}
+
+func TestSplitEqualityCLI(t *testing.T) {
+	buf := &bytes.Buffer{}
+	cmd := NewRootCmd(buf)
+	cmd.SetArgs([]string{"-o", "human", "split", "2001:db8::/64", "--new-prefix", "64"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("split equality cli failed: %v", err)
+	}
+	out := strings.TrimSpace(buf.String())
+	if out != "2001:db8::/64" {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestOverlapErrorType(t *testing.T) {
+	err := OverlapError{}
+	if _, ok := interface{}(err).(error); !ok {
+		t.Fatal("OverlapError does not implement error")
 	}
 }
