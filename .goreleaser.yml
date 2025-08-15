@@ -54,36 +54,9 @@ signs:
     env:
       - COSIGN_EXPERIMENTAL=1
 
-homebrew_casks:
-  - name: ip6calc
-    ids: [archive]
-    repository:
-      owner: zlobste
-      name: homebrew-tap
-      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
-    commit_author:
-      name: goreleaser
-      email: noreply@example.com
-    homepage: https://github.com/zlobste/ip6calc
-    description: IPv6 subnet calculator and Go library
-    binary: ip6calc
-    caveats: |
-      After installation you can run `ip6calc version` to verify it works.
-    skip_upload: false
-
-scoops:
-  - name: ip6calc
-    repository:
-      owner: zlobste
-      name: scoop-bucket
-    commit_author:
-      name: goreleaser
-      email: noreply@example.com
-    homepage: https://github.com/zlobste/ip6calc
-    description: IPv6 subnet calculator and Go library
-    license: MIT
-    persist: []
-    shortcuts: []
+# NOTE: Homebrew cask and Scoop packaging temporarily disabled because target
+# repositories (zlobste/homebrew-tap, zlobste/scoop-bucket) don't exist yet.
+# Re-enable by restoring the removed sections below once the repos are created.
 
 release:
   draft: false
