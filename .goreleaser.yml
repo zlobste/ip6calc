@@ -1,3 +1,4 @@
+version: 2
 project_name: ip6calc
 
 before:
@@ -20,19 +21,17 @@ builds:
 
 archives:
   - id: archive
-    builds: [ip6calc]
+    ids: [ip6calc]
     format_overrides:
       - goos: windows
-        format: zip
-    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+        formats: [zip]
+    # Use conditional to replace darwin with macOS (replacements removed in v2)
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ if eq .Os "darwin" }}macOS{{ else }}{{ .Os }}{{ end }}_{{ .Arch }}'
     files:
       - LICENSE
       - README.md
-      - CHANGELOG.md
       - SECURITY.md
       - CONTRIBUTING.md
-    replacements:
-      darwin: macOS
     wrap_in_directory: true
 
 checksum:
@@ -55,36 +54,36 @@ signs:
     env:
       - COSIGN_EXPERIMENTAL=1
 
-brews:
+homebrew_casks:
   - name: ip6calc
+    ids: [archive]
     repository:
       owner: zlobste
       name: homebrew-tap
-    directory: Formula
+      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
+    commit_author:
+      name: goreleaser
+      email: noreply@example.com
+    homepage: https://github.com/zlobste/ip6calc
+    description: IPv6 subnet calculator and Go library
+    binary: ip6calc
+    caveats: |
+      After installation you can run `ip6calc version` to verify it works.
+    skip_upload: false
+
+scoops:
+  - name: ip6calc
+    repository:
+      owner: zlobste
+      name: scoop-bucket
     commit_author:
       name: goreleaser
       email: noreply@example.com
     homepage: https://github.com/zlobste/ip6calc
     description: IPv6 subnet calculator and Go library
     license: MIT
-    test: |
-      system "#{bin}/ip6calc", "version"
-    install: |
-      bin.install "ip6calc"
-    skip_upload: false
-
-scoop:
-  bucket:
-    owner: zlobste
-    name: scoop-bucket
-  commit_author:
-    name: goreleaser
-    email: noreply@example.com
-  homepage: https://github.com/zlobste/ip6calc
-  description: IPv6 subnet calculator and Go library
-  license: MIT
-  persist: []
-  shortcut: []
+    persist: []
+    shortcuts: []
 
 release:
   draft: false

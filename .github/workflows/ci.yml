@@ -54,6 +54,11 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: GoReleaser config lint
+        run: |
+          go install github.com/goreleaser/goreleaser/v2@v2.11.2
+          $(go env GOPATH)/bin/goreleaser check
+
       - name: Run tests (race)
         run: go test -race ./... -count=1 -coverprofile=coverage.out -covermode=atomic
 
