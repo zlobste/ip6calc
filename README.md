@@ -160,7 +160,7 @@ Core logic targets >90% coverage (property-based + fuzz tests included).
 4. Keep PRs focused; maintain >90% coverage for core paths.
 
 ## License
-MIT (see `LICENSE`).
+MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 If this project helps you, a GitHub star is appreciated.
